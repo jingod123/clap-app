@@ -8,7 +8,7 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 
 @st.cache_resource
 def load_yolo_model():
-    return YOLO("yolo11n-pose.pt")  # 배포용은 n 추천
+    return YOLO("yolo11n-pose.pt")
 
 
 model = load_yolo_model()
@@ -16,53 +16,65 @@ model = load_yolo_model()
 st.title("🤸 실시간 포즈 인식 웹캠 (YOLOv11)")
 st.write("START 버튼을 누르고 브라우저 카메라 권한을 허용하세요.")
 
-if "clap_count" not in st.session_state:
-    st.session_state.clap_count = 0
-
 
 class PoseClapProcessor(VideoProcessorBase):
     def __init__(self):
         self.clap_flag = False
+        self.clap_count = 0
+        self.frame_count = 0
+        self.last_frame = None
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
+        self.frame_count += 1
 
-        results = model(img, verbose=False)
-        annotated_frame = results[0].plot()
+        # 화면 크기 줄이기
+        small = cv2.resize(img, (320, 240))
 
-        keypoints = results[0].keypoints
+        # 5프레임마다 한 번만 YOLO 실행
+        if self.frame_count % 5 == 0:
+            results = model(small, verbose=False)
+            annotated_frame = results[0].plot()
 
-        if keypoints is not None:
-            xy = keypoints.xy.cpu().numpy()
+            keypoints = results[0].keypoints
 
-            if len(xy) > 0:
-                person = xy[0]
+            if keypoints is not None:
+                xy = keypoints.xy.cpu().numpy()
 
-                left_wrist = person[9]
-                right_wrist = person[10]
+                if len(xy) > 0:
+                    person = xy[0]
 
-                if left_wrist.sum() > 0 and right_wrist.sum() > 0:
-                    dist = np.linalg.norm(left_wrist - right_wrist)
+                    left_wrist = person[9]
+                    right_wrist = person[10]
 
-                    if dist < 50:
-                        if not self.clap_flag:
-                            st.session_state.clap_count += 1
-                            self.clap_flag = True
-                    else:
-                        self.clap_flag = False
+                    if left_wrist.sum() > 0 and right_wrist.sum() > 0:
+                        dist = np.linalg.norm(left_wrist - right_wrist)
 
-                cv2.putText(
-                    annotated_frame,
-                    f"Clap Count: {st.session_state.clap_count}",
-                    (30, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1.2,
-                    (0, 0, 255),
-                    3,
-                )
+                        if dist < 35:
+                            if not self.clap_flag:
+                                self.clap_count += 1
+                                self.clap_flag = True
+                        else:
+                            self.clap_flag = False
+
+            cv2.putText(
+                annotated_frame,
+                f"Clap Count: {self.clap_count}",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 0, 255),
+                2,
+            )
+
+            self.last_frame = annotated_frame
+
+        # YOLO를 실행하지 않는 프레임에는 이전 결과 화면 재사용
+        if self.last_frame is None:
+            self.last_frame = small
 
         return av.VideoFrame.from_ndarray(
-            annotated_frame,
+            self.last_frame,
             format="bgr24"
         )
 
@@ -71,7 +83,12 @@ webrtc_streamer(
     key="pose-clap",
     video_processor_factory=PoseClapProcessor,
     media_stream_constraints={
-        "video": True,
+        "video": {
+            "width": 320,
+            "height": 240,
+            "frameRate": 10,
+        },
         "audio": False,
     },
+    async_processing=True,
 )
